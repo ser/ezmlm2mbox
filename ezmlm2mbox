@@ -1,0 +1,118 @@
+#!/usr/bin/perl -w
+
+#
+# convert ezmlm archive to mbox
+#
+# usage: ezmlm2mbox [-d] ezmlm_dir >mbox
+#
+# For each message in the archive we generate a "From " header by looking for
+# an address in Return-Path:, From:, or Sender: headers (from most to least
+# desirable).  We only adhere to some of the more trivial subsets of rfc2822
+# parsing when looking at these headers -- in particular nested comments are
+# not supported, nor are continuation lines.
+#
+# The date for the "From " header is generated from the mtime of the archive
+# file.
+#
+# If you specify -d then any Date: header is renamed X-Original-Date: and a
+# new Date: is generated based on the mtime.
+#
+# The remainder of the archive file is appended with only minor alteration --
+# /^From / is replaced with "X-Mail-From_:" in the header or ">From " in the
+# body.  No other alterations are made.
+#
+# Note that most unexpected situations are fatal errors... in particular if we
+# can't figure out a "From " address from the headers we bail.  In that case
+# you might try editting the archive file itself to fixup the header -- but be
+# careful to save the original mtime!  For example, use a sequence like the
+# following to edit archive file 3/45:
+#
+#	touch -r 3/45 stamp && vi 3/45 && touch -r stamp 3/45 && rm stamp
+#
+# If your touch(1) doesn't have -r then upgrade to the 21st century please.
+#
+
+# Copyright (c) 2005 Dean Gaudet <dean@arctic.org>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a
+# copy of this software and associated documentation files (the "Software"),
+# to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included
+# in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+# OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+# ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+# $Id: ezmlm2mbox,v 1.5 2005/06/29 12:02:00 dean Exp $
+
+use strict;
+use POSIX qw(strftime);
+use Getopt::Std;
+
+my %opts;
+getopts('d', \%opts);
+
+$#ARGV == 0 or die "usage: $0 [-d] dir\n";
+
+my $dir = shift;
+chdir($dir) or die "unable to chdir($dir): $!\n";
+-d "subscribers" or die "no $dir/subscribers, are you sure $dir is an ezmlm list directory?\n";
+chdir("archive") or die "unable to chdir($dir/archive): $!\n";
+
+# recurse the archive directories in numerical order
+opendir(L1, ".") or die "unable to opendir(.): $!\n";
+foreach my $l1 (sort { $a <=> $b } grep /^\d+$/, readdir(L1)) {
+	opendir(L2, "$l1") or die "unable to opendir($l1): $!\n";
+	foreach my $l2 (sort {$a <=> $b} grep /^\d+$/, readdir(L2)) {
+		open(my $fh, "<$l1/$l2") or die "unable to open $l1/$l2 for reading: $!\n";
+
+		# parse the header -- we may need some of the headers
+		# note we don't care about continuation lines...
+		my $out = '';
+		my %h;
+		while (<$fh>) {
+			s/^From /X-Mail-From_: /;
+			s/^Date:/X-Original-Date:/i if $opts{'d'};
+			$out .= $_;
+			last if /^$/;
+			if (my ($name, $value) = /^([^\s:]+):(.*)/) {
+				$name =~ tr/A-Z/a-z/;	# header names are case-insensitive
+				$h{$name} = $value;
+			}
+		}
+
+		# we prefer the nice sane Return-Path header but old qmail/ezmlm
+		# didn't put it in the archived files... we resort to painful From
+		# and Sender if we have to.
+		my $addr = $h{"return-path"} || $h{"from"} || $h{"sender"}
+			or die "no Return-Path, From or Sender in $l1/$l2\n";
+
+		# strip () comments, and look for a <addr> or naked addr
+		$addr =~ s#\([^\)]*\)##g;
+		$addr =~ s#.*<([^>]*)>.*#$1#
+			or $addr =~ s#^\s*(\S+\@\S+)\s*$#$1#
+			or die "Return-Path/From/Sender '$addr' in unexpected format in $l1/$l2\n";
+
+		my $mtime = (stat($fh))[9];
+		# dump the "From " header and the From-escaped message body
+		print "From $addr  " . strftime("%a %b %e %T %Y +0000\n", gmtime($mtime));
+
+		print strftime("Date: %a, %e %b %Y %T +0000 (UTC)\n", gmtime($mtime)) if $opts{'d'};
+
+		print $out;
+		while (<$fh>) {
+			s/^From />From /;
+			print;
+		}
+		print "\n";
+	}
+}
